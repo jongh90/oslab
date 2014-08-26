@@ -445,7 +445,7 @@ static void netbk_gop_frag_copy(struct xenvif *vif, struct sk_buff *skb,
 			meta = get_next_rx_buffer(vif, npo);
 		}
 
-		if (npo->copy_off + bytes > MAX_BUFFER_OFFSET)
+		if (npo->copy_off + bytes > MAX_BUFFER_OFFSET) /* MAX_BUFFER_OFFSET = PAGE_SIZE */
 			bytes = MAX_BUFFER_OFFSET - npo->copy_off;
 
 		copy_gop = npo->copy + npo->copy_prod++;
@@ -505,6 +505,13 @@ static void netbk_gop_frag_copy(struct xenvif *vif, struct sk_buff *skb,
  * zero GSO descriptors (for non-GSO packets) or one descriptor (for
  * frontend-side LRO).
  */
+/*
+ *  SKB가 frontend로 전송되기 위한 준비.
+ *  이 함수는 grant operations, meta structures, etc 를 할당한다.
+ *  이 것은 소비된 meta structures의 수를 리턴한다.
+ *  사용된 ring slots의 수 = 사용된 meta slots의 수 + 사용된 GSO descriptors의 수
+ *  현재는 zero 혹은 one descriptor를 사용한다.
+ */
 static int netbk_gop_skb(struct sk_buff *skb,
 			 struct netrx_pending_operations *npo)
 {
@@ -541,7 +548,26 @@ static int netbk_gop_skb(struct sk_buff *skb,
 	npo->copy_off = 0;
 	npo->copy_gref = req->gref;
 
-	data = skb->data;
+	data = skb->data; /* data header pointer */
+	/*  
+	 *  |      |
+	 *  +------+ -----> +------+
+	 *  | head |        |      |
+	 *  +------+ -----> +------+
+	 *  | data |        |  IP  |
+	 *  +------+        +------+
+	 *  | .... |        |  TCP |
+	 *                  +------+
+	 *                  | data |
+	 *  +------+ -----> +------+
+	 *  | tail |        |      |
+     *  +------+ -----> +------+
+	 *  | end  |        
+	 *  +------+
+	    | .... |
+	 *
+	 *   sk_buff         packet
+	 */
 	while (data < skb_tail_pointer(skb)) {
 		unsigned int offset = offset_in_page(data);
 		unsigned int len = PAGE_SIZE - offset;
@@ -649,14 +675,17 @@ static void xen_netbk_rx_action(struct xen_netbk *netbk)
 		vif = netdev_priv(skb->dev);
 		nr_frags = skb_shinfo(skb)->nr_frags;
 
+		/* sk_buff.cb[48] : 컨트롤 버퍼로써 private 값들을 넣고 사용가능 */
 		sco = (struct skb_cb_overlay *)skb->cb;
 		sco->meta_slots_used = netbk_gop_skb(skb, &npo);
 
+		/* nr_frags = 0은 sk_buff가 fragment 되지 않고 하나만 존재한다. */
 		count += nr_frags + 1;
 
 		__skb_queue_tail(&rxq, skb);
 
 		/* Filled the batch queue? */
+		/* MAX_SKB_FRAGS가 없다면, 다음 루프 때, 문제가 될 가능성이 존재함 */
 		if (count + MAX_SKB_FRAGS >= XEN_NETIF_RX_RING_SIZE)
 			break;
 	}
@@ -668,7 +697,8 @@ static void xen_netbk_rx_action(struct xen_netbk *netbk)
 
 	BUG_ON(npo.copy_prod > ARRAY_SIZE(netbk->grant_copy_op));
 	gnttab_batch_copy(netbk->grant_copy_op, npo.copy_prod);
-
+	
+	/*140826 : xen 분석 7일차 */
 	while ((skb = __skb_dequeue(&rxq)) != NULL) {
 		sco = (struct skb_cb_overlay *)skb->cb;
 
@@ -1616,11 +1646,12 @@ static int xen_netbk_kthread(void *data)
 {
 	struct xen_netbk *netbk = data;
 	while (!kthread_should_stop()) {
+		/* 조건을 만족할 때까지 wait queue에서 기다린다. */
 		wait_event_interruptible(netbk->wq,
 				rx_work_todo(netbk) ||
 				tx_work_todo(netbk) ||
 				kthread_should_stop());
-		cond_resched();
+		cond_resched(); /* 스케줄 함수를 호출함 */
 
 		if (kthread_should_stop())
 			break;
@@ -1699,8 +1730,10 @@ static int __init netback_init(void)
 		skb_queue_head_init(&netbk->rx_queue);
 		skb_queue_head_init(&netbk->tx_queue);
 
+		/* xen_netbk_ktrhead를 주기적으로 실행시키기 위한 타이머 */
 		init_timer(&netbk->net_timer);
 		netbk->net_timer.data = (unsigned long)netbk;
+		/* xen_btkb_alarm : netbk 의 wait queue에 있는 thread를 깨우는 함수 */
 		netbk->net_timer.function = xen_netbk_alarm;
 
 		netbk->pending_cons = 0;
