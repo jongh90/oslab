@@ -597,6 +597,11 @@ static int netbk_gop_skb(struct sk_buff *skb,
  * netrx_pending_operations, which have since been done.  Check that
  * they didn't give any errors and advance over them.
  */
+/*
+ *  netbk_gop_skb 와 쌍을 이룬다. netbk_gop_skb가 netrx_pending_opreations의 상단에
+ *  operations을 설정하기위해 사용되었다고 가정한다.
+ *  그것들이 어떤 에러를 가지지 않는지 확인한다.
+ */
 static int netbk_check_gop(struct xenvif *vif, int nr_meta_slots,
 			   struct netrx_pending_operations *npo)
 {
@@ -718,11 +723,11 @@ static void xen_netbk_rx_action(struct xen_netbk *netbk)
 			sco->meta_slots_used--;
 		}
 
-
+		/* ??? : tx 값을 증가시키는 이유는 무엇일까? */
 		vif->dev->stats.tx_bytes += skb->len;
 		vif->dev->stats.tx_packets++;
 
-		status = netbk_check_gop(vif, sco->meta_slots_used, &npo);
+		status = netbk_check_gop(vif, sco->meta_slots_used, &npo); /* ERROR : -1, OKAY : 0 */
 
 		if (sco->meta_slots_used == 1)
 			flags = 0;
@@ -736,6 +741,13 @@ static void xen_netbk_rx_action(struct xen_netbk *netbk)
 			flags |= XEN_NETRXF_data_validated;
 
 		offset = 0;
+		/*
+		 *   xen_netif_rx_response resp
+		 *   id     : netbk->meta[npo.meta_cons].id
+		 *   status : netbk->meta[npo.meta_cons].size or ERROR(-1)
+		 *   flags  : flags
+		 *   offset : 0
+		 */
 		resp = make_rx_response(vif, netbk->meta[npo.meta_cons].id,
 					status, offset,
 					netbk->meta[npo.meta_cons].size,
@@ -767,13 +779,15 @@ static void xen_netbk_rx_action(struct xen_netbk *netbk)
 		if (ret && list_empty(&vif->notify_list))
 			list_add_tail(&vif->notify_list, &notify);
 
+		/* ??? tx!! */
 		xenvif_notify_tx_completion(vif);
-
+		
+		/* ??? */
 		xenvif_put(vif);
 		npo.meta_cons += sco->meta_slots_used;
 		dev_kfree_skb(skb);
 	}
-
+	/* list_for_each_entry_safe : 각 node를 제거하며 순회한다. */
 	list_for_each_entry_safe(vif, tmp, &notify, notify_list) {
 		notify_remote_via_irq(vif->irq);
 		list_del_init(&vif->notify_list);
@@ -1754,7 +1768,8 @@ static int __init netback_init(void)
 		}
 
 		kthread_bind(netbk->task, group);
-
+		
+		/* domain 간의 net_dev를 스케쥴하기 위한 */
 		INIT_LIST_HEAD(&netbk->net_schedule_list);
 
 		spin_lock_init(&netbk->net_schedule_list_lock);
