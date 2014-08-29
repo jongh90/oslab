@@ -63,6 +63,14 @@ struct xenvif {
 	/* List of frontends to notify after a batch of frames sent. */
 	struct list_head notify_list;
 
+	/*
+	 *  __name##_back_ring
+	 *  @ res_prod_pvt
+	 *  @ req_cons
+	 *  @ nr_ents
+	 *  @ *string
+	 */
+
 	/* The shared rings and indexes. */
 	struct xen_netif_tx_back_ring tx;
 	struct xen_netif_rx_back_ring rx;

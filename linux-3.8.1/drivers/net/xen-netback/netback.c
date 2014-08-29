@@ -413,6 +413,7 @@ static void netbk_gop_frag_copy(struct xenvif *vif, struct sk_buff *skb,
 	 * These variables are used iff get_page_ext returns true,
 	 * in which case they are guaranteed to be initialized.
 	 */
+	/* uninitialized_var() : 초기화 되지 않은 변수의 경고를 없앤다. */
 	unsigned int uninitialized_var(group), uninitialized_var(idx);
 	int foreign = get_page_ext(page, &group, &idx);
 	unsigned long bytes;
@@ -420,9 +421,11 @@ static void netbk_gop_frag_copy(struct xenvif *vif, struct sk_buff *skb,
 	/* Data must not cross a page boundary. */
 	BUG_ON(size + offset > PAGE_SIZE<<compound_order(page));
 
+	/* 현재 nop->meta_prod는 증가되어있는 상태이므로 -1을 해준다. */
 	meta = npo->meta + npo->meta_prod - 1;
 
 	/* Skip unused frames from start of page */
+	/* 페이지의 시작에서 사용되지 않은 frame들을 무시한다. */
 	page += offset >> PAGE_SHIFT;
 	offset &= ~PAGE_MASK;
 
@@ -450,6 +453,12 @@ static void netbk_gop_frag_copy(struct xenvif *vif, struct sk_buff *skb,
 
 		copy_gop = npo->copy + npo->copy_prod++;
 		copy_gop->flags = GNTCOPY_dest_gref;
+		/*
+         *   도메인 0의 안전성에 영향을 미치는 네트워크 드라이버에 버그를 방지하기 위해서
+		 *   네트워크 카드를 책임지는 도메인이 드라이버 도메인으로 실행되기도 하는데,
+		 *   이때 dom0 게스트가 드라이버 도메인과 다른 domU 게스트 사이에 복사 오퍼레이션을
+		 *   시작시킬 수 있다. (Xen 하이퍼바이저 완벽가이드 p76)
+		 */
 		if (foreign) {
 			struct xen_netbk *netbk = &xen_netbk[group];
 			struct pending_tx_info *src_pend;
@@ -471,6 +480,22 @@ static void netbk_gop_frag_copy(struct xenvif *vif, struct sk_buff *skb,
 		copy_gop->dest.u.ref = npo->copy_gref;
 		copy_gop->len = bytes;
 
+		/*  !foreign                         foreign
+		 *
+		 *  +-----------------------------+
+		 *  | source.domid  = DOMID_SELF  |  src_pend->vif->domid
+		 *  | source.offset = offset      |     
+		 *  | source.u.gmfn = page        |  -
+		 *  | source.u.ref  = -           |  src_pend->req.gref 
+		 *  +-----------------------------+
+		 *  | dest.domid  = vif->domid    |
+		 *  | dest.offset = npo->copy_off |
+		 *  | dest.u.ref  = npo->copy_gref|
+		 *  +-----------------------------+
+		 *  | len   = bytes               |
+		 *  | flags = GNTCOPY_dest_gref   |  |= GNTCOPY_srouce_gref
+		 *  +-----------------------------+
+		 */
 		npo->copy_off += bytes;
 		meta->size += bytes;
 
@@ -484,7 +509,7 @@ static void netbk_gop_frag_copy(struct xenvif *vif, struct sk_buff *skb,
 			offset = 0;
 		}
 
-		/* Leave a gap for the GSO descriptor. */
+		/* Leave a gap for the GSO descriptor.??? */
 		if (*head && skb_shinfo(skb)->gso_size && !vif->gso_prefix)
 			vif->rx.req_cons++;
 
@@ -526,6 +551,13 @@ static int netbk_gop_skb(struct sk_buff *skb,
 
 	old_meta_prod = npo->meta_prod;
 
+	/*
+	 * xen_netif_rx_request 구조체
+	 * @id   : 요청과 응답 쌍을 맞추기 위해
+	 * @gref : 패킷을 전달받는 데 사용된 버퍼
+	 * RING_GET_REQUEST : rx data를 copy할 버퍼를 가져오기 위해서.
+	 */
+
 	/* Set up a GSO prefix descriptor, if necessary */
 	if (skb_shinfo(skb)->gso_size && vif->gso_prefix) {
 		req = RING_GET_REQUEST(&vif->rx, vif->rx.req_cons++);
@@ -547,19 +579,38 @@ static int netbk_gop_skb(struct sk_buff *skb,
 	meta->id = req->id;
 	npo->copy_off = 0;
 	npo->copy_gref = req->gref;
+    
+	/*
+	 *   gso_prefix 일때                          !gso_prefix 일때
+	 *                                              
+	 *   |             |                          |             |
+	 *   +-------------+ meta[npo->meta_prod]     +-------------+ meta[npo->meta_prod]
+	 *   |gso_size =   |                          |gso_size =   |
+	 *   +-------------+                          +-------------+
+	 *   |size = 0     |                          |size = 0     |
+	 *   +-------------+                          +-------------+
+	 *   |id = req->id |                          |id = req->id |
+	 *   +-------------+ meta[npo->meta_prod++]   +-------------+ ...
+	 *   |gso_size = 0 |
+	 *   +-------------+
+	 *   |size = 0     |
+	 *   +-------------+
+	 *   |id = req->id |
+	 *   +-------------+ ...
+	 */
 
 	data = skb->data; /* data header pointer */
 	/*  
 	 *  |      |
 	 *  +------+ -----> +------+
 	 *  | head |        |      |
-	 *  +------+ -----> +------+
+	 *  +------+ -----> +------+ ***
 	 *  | data |        |  IP  |
 	 *  +------+        +------+
 	 *  | .... |        |  TCP |
 	 *                  +------+
 	 *                  | data |
-	 *  +------+ -----> +------+
+	 *  +------+ -----> +------+ ***
 	 *  | tail |        |      |
      *  +------+ -----> +------+
 	 *  | end  |        
@@ -701,6 +752,7 @@ static void xen_netbk_rx_action(struct xen_netbk *netbk)
 		return;
 
 	BUG_ON(npo.copy_prod > ARRAY_SIZE(netbk->grant_copy_op));
+	/* 공유 정보 페이지에 실제로 복사를 한다. */
 	gnttab_batch_copy(netbk->grant_copy_op, npo.copy_prod);
 	
 	/*140826 : xen 분석 7일차 */
@@ -769,7 +821,7 @@ static void xen_netbk_rx_action(struct xen_netbk *netbk)
 			gso->type = XEN_NETIF_EXTRA_TYPE_GSO;
 			gso->flags = 0;
 		}
-
+		/*??* */
 		netbk_add_frag_responses(vif, status,
 					 netbk->meta + npo.meta_cons + 1,
 					 sco->meta_slots_used);
@@ -1672,7 +1724,7 @@ static int xen_netbk_kthread(void *data)
 
 		if (rx_work_todo(netbk))
 			xen_netbk_rx_action(netbk);
-
+		/* 140827 xen분석 8일차 */
 		if (tx_work_todo(netbk))
 			xen_netbk_tx_action(netbk);
 	}
