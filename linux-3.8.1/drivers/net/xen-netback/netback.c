@@ -369,7 +369,7 @@ unsigned int xen_netbk_count_skb_slots(struct xenvif *vif, struct sk_buff *skb)
 	}
 	return count;
 }
-
+/* netrx 구조체에 추가적인 연산 자료들 */
 struct netrx_pending_operations {
 	unsigned copy_prod, copy_cons;
 	unsigned meta_prod, meta_cons;
@@ -639,6 +639,10 @@ static int netbk_gop_skb(struct sk_buff *skb,
 				    &head);
 	}
 
+	/* 
+	 *  skb_shinfo(skb)->gso_size && vif->gso_prefix : return 2;
+	 *  else : return 1;
+     */
 	return npo->meta_prod - old_meta_prod;
 }
 
@@ -793,19 +797,15 @@ static void xen_netbk_rx_action(struct xen_netbk *netbk)
 			flags |= XEN_NETRXF_data_validated;
 
 		offset = 0;
-		/*
-		 *   xen_netif_rx_response resp
-		 *   id     : netbk->meta[npo.meta_cons].id
-		 *   status : netbk->meta[npo.meta_cons].size or ERROR(-1)
-		 *   flags  : flags
-		 *   offset : 0
-		 */
+		
+		/* ??? : 함수의 내용이 없다... */
 		resp = make_rx_response(vif, netbk->meta[npo.meta_cons].id,
 					status, offset,
 					netbk->meta[npo.meta_cons].size,
 					flags);
 
 		if (netbk->meta[npo.meta_cons].gso_size && !vif->gso_prefix) {
+			/*xen_netif_rx_response 와 자료 크기는 같다. */
 			struct xen_netif_extra_info *gso =
 				(struct xen_netif_extra_info *)
 				RING_GET_RESPONSE(&vif->rx,
@@ -821,7 +821,7 @@ static void xen_netbk_rx_action(struct xen_netbk *netbk)
 			gso->type = XEN_NETIF_EXTRA_TYPE_GSO;
 			gso->flags = 0;
 		}
-		/*??* */
+		/*???*/
 		netbk_add_frag_responses(vif, status,
 					 netbk->meta + npo.meta_cons + 1,
 					 sco->meta_slots_used);
@@ -841,6 +841,7 @@ static void xen_netbk_rx_action(struct xen_netbk *netbk)
 	}
 	/* list_for_each_entry_safe : 각 node를 제거하며 순회한다. */
 	list_for_each_entry_safe(vif, tmp, &notify, notify_list) {
+		/*notify_remote_via_irq : 이벤트를 보낸다. */
 		notify_remote_via_irq(vif->irq);
 		list_del_init(&vif->notify_list);
 	}
@@ -1372,6 +1373,7 @@ static unsigned xen_netbk_tx_build_gops(struct xen_netbk *netbk)
 		pending_ring_idx_t index;
 
 		/* Get a netif from the list with work to do. */
+		/* */
 		vif = poll_net_schedule_list(netbk);
 		/* This can sometimes happen because the test of
 		 * list_empty(net_schedule_list) at the top of the
@@ -1381,6 +1383,11 @@ static unsigned xen_netbk_tx_build_gops(struct xen_netbk *netbk)
 		if (!vif)
 			continue;
 
+		/*
+		 *  
+		 *
+		 *
+		 */
 		if (vif->tx.sring->req_prod - vif->tx.req_cons >
 		    XEN_NETIF_TX_RING_SIZE) {
 			netdev_err(vif->dev,
@@ -1391,13 +1398,18 @@ static unsigned xen_netbk_tx_build_gops(struct xen_netbk *netbk)
 			netbk_fatal_tx_err(vif);
 			continue;
 		}
-
+		
+		/* RING에 REQUESTS가 몇 개 존재하는지 확인한다. */
 		RING_FINAL_CHECK_FOR_REQUESTS(&vif->tx, work_to_do);
 		if (!work_to_do) {
 			xenvif_put(vif);
 			continue;
 		}
 
+		/*??? memcpy를 통해 메모리로 복사하고 txreq를 사용하는 이유는? */
+		/* 추측 : RING_GET_REQEUST는 공유메모리 영역이라서 느리다.
+		   데이터를 계속 참조하기 위해서는 해당 domain 영역 메모리에 복사 후
+		   사용하는 것이 효율적이다. */
 		idx = vif->tx.req_cons;
 		rmb(); /* Ensure that we see the request before we copy it. */
 		memcpy(&txreq, RING_GET_REQUEST(&vif->tx, idx), sizeof(txreq));
@@ -1414,7 +1426,7 @@ static unsigned xen_netbk_tx_build_gops(struct xen_netbk *netbk)
 		work_to_do--;
 		vif->tx.req_cons = ++idx;
 
-		memset(extras, 0, sizeof(extras));
+		memset(extras, 0, sizeof(extras)); /* XEN_NETIF_EXTRA_TYPE_MAX -1 */
 		if (txreq.flags & XEN_NETTXF_extra_info) {
 			work_to_do = xen_netbk_get_extras(vif, extras,
 							  work_to_do);
@@ -1821,7 +1833,7 @@ static int __init netback_init(void)
 
 		kthread_bind(netbk->task, group);
 		
-		/* domain 간의 net_dev를 스케쥴하기 위한 */
+		/* ??? domain 간의 net_dev를 스케쥴하기 위한 */
 		INIT_LIST_HEAD(&netbk->net_schedule_list);
 
 		spin_lock_init(&netbk->net_schedule_list_lock);
