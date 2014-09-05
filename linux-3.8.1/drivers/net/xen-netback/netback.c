@@ -722,6 +722,7 @@ static void xen_netbk_rx_action(struct xen_netbk *netbk)
 	unsigned long offset;
 	struct skb_cb_overlay *sco;
 
+	/*init npo!! */
 	struct netrx_pending_operations npo = {
 		.copy  = netbk->grant_copy_op,
 		.meta  = netbk->meta,
@@ -760,6 +761,7 @@ static void xen_netbk_rx_action(struct xen_netbk *netbk)
 	gnttab_batch_copy(netbk->grant_copy_op, npo.copy_prod);
 	
 	/*140826 : xen 분석 7일차 */
+	/*response */
 	while ((skb = __skb_dequeue(&rxq)) != NULL) {
 		sco = (struct skb_cb_overlay *)skb->cb;
 
@@ -780,6 +782,7 @@ static void xen_netbk_rx_action(struct xen_netbk *netbk)
 		}
 
 		/* ??? : tx 값을 증가시키는 이유는 무엇일까? */
+		/* vig->dev 입장에서는 tx 이다.  */
 		vif->dev->stats.tx_bytes += skb->len;
 		vif->dev->stats.tx_packets++;
 
@@ -831,7 +834,7 @@ static void xen_netbk_rx_action(struct xen_netbk *netbk)
 		if (ret && list_empty(&vif->notify_list))
 			list_add_tail(&vif->notify_list, &notify);
 
-		/* ??? tx!! */
+		/* ??? tx!! clean up, softirq 호출 */
 		xenvif_notify_tx_completion(vif);
 		
 		/* ??? */
@@ -850,6 +853,7 @@ static void xen_netbk_rx_action(struct xen_netbk *netbk)
 	if (!skb_queue_empty(&netbk->rx_queue) &&
 			!timer_pending(&netbk->net_timer))
 		xen_netbk_kick_thread(netbk);
+	/*npo?? init? */
 }
 
 void xen_netbk_queue_tx_skb(struct xenvif *vif, struct sk_buff *skb)
@@ -881,6 +885,10 @@ static void remove_from_net_schedule_list(struct xenvif *vif)
 	}
 }
 
+/*
+ *  netbk의 net_schedule_list에서 vif를 가져오고 
+ *  net_schedulde_list에서 요소를 삭제한다.
+ */
 static struct xenvif *poll_net_schedule_list(struct xen_netbk *netbk)
 {
 	struct xenvif *vif = NULL;
@@ -1063,6 +1071,7 @@ static struct gnttab_copy *xen_netbk_get_requests(struct xen_netbk *netbk,
 	int i, start;
 
 	/* Skip first skb fragment if it is on same page as header fragment. */
+	/* 0 : , 1 : */
 	start = (frag_get_pending_idx(&shinfo->frags[0]) == pending_idx);
 
 	for (i = start; i < shinfo->nr_frags; i++, txp++) {
@@ -1187,6 +1196,7 @@ static void xen_netbk_fill_frags(struct xen_netbk *netbk, struct sk_buff *skb)
 		skb->truesize += txp->size;
 
 		/* Take an extra reference to offset xen_netbk_idx_release */
+		/* 해당 페이지의 참조의 수를 늘린다.*/
 		get_page(netbk->mmap_pages[pending_idx]);
 		xen_netbk_idx_release(netbk, pending_idx, XEN_NETIF_RSP_OKAY);
 	}
@@ -1373,7 +1383,7 @@ static unsigned xen_netbk_tx_build_gops(struct xen_netbk *netbk)
 		pending_ring_idx_t index;
 
 		/* Get a netif from the list with work to do. */
-		/* */
+		/*  */
 		vif = poll_net_schedule_list(netbk);
 		/* This can sometimes happen because the test of
 		 * list_empty(net_schedule_list) at the top of the
@@ -1382,11 +1392,10 @@ static unsigned xen_netbk_tx_build_gops(struct xen_netbk *netbk)
 		 */
 		if (!vif)
 			continue;
-
 		/*
-		 *  
-		 *
-		 *
+		 *  loop의 상단에서 list_empty(net_schedule_list)의 결과가 
+		 *  unlock되어 있기때문에 이런경우가 나타난다. 
+		 *  단순히 돌아가서 다른 lock를 가진다.
 		 */
 		if (vif->tx.sring->req_prod - vif->tx.req_cons >
 		    XEN_NETIF_TX_RING_SIZE) {
@@ -1476,7 +1485,7 @@ static unsigned xen_netbk_tx_build_gops(struct xen_netbk *netbk)
 
 		/* Packets passed to netif_rx() must have some headroom. */
 		skb_reserve(skb, NET_SKB_PAD + NET_IP_ALIGN);
-
+		/* skb shared info 에 자료 구조를 초기화 한다.  */
 		if (extras[XEN_NETIF_EXTRA_TYPE_GSO - 1].type) {
 			struct xen_netif_extra_info *gso;
 			gso = &extras[XEN_NETIF_EXTRA_TYPE_GSO - 1];
@@ -1572,6 +1581,7 @@ static void xen_netbk_tx_submit(struct xen_netbk *netbk)
 			continue;
 		}
 
+		/* 실제 skb 구조체에 데이터가 cpy되는 과정으로 추정, 그림으로 그려볼것 */
 		data_len = skb->len;
 		memcpy(skb->data,
 		       (void *)(idx_to_kaddr(netbk, pending_idx)|txp->offset),
@@ -1581,7 +1591,7 @@ static void xen_netbk_tx_submit(struct xen_netbk *netbk)
 			txp->offset += data_len;
 			txp->size -= data_len;
 		} else {
-			/* Schedule a response immediately. */
+			/* ??? Schedule a response immediately. */
 			xen_netbk_idx_release(netbk, pending_idx, XEN_NETIF_RSP_OKAY);
 		}
 
